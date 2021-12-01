@@ -229,69 +229,6 @@ class IterativeFFTParticleReconstruction(OriginalIterativeFFTParticleReconstruct
 
     """Any update / test / improvement upon original algorithm."""
 
-    def _iterate(self, return_psi=False):
-        self.log_info('Running iteration {:d}.'.format(self._iter))
-
-        if self._iter > 0:
-            self.mesh_data = self.mesh_delta.copy(value=None)
-            # Painting reconstructed data real-space positions
-            super(OriginalIterativeFFTParticleReconstruction,self).assign_data(self._positions_rec_data,weights=self._weights_data) # super in order not to save positions_rec_data
-            # Gaussian smoothing before density contrast calculation
-            self.mesh_data.smooth_gaussian(self.smoothing_radius,method='fft',engine=self.fft_engine)
-
-        self.set_density_contrast(ran_min=self.ran_min, smoothing_radius=self.smoothing_radius)
-        del self.mesh_data
-        delta_k = self.mesh_delta.to_complex(engine=self.fft_engine)
-        k = utils.broadcast_arrays(*delta_k.coords())
-        k2 = sum(kk**2 for kk in k)
-        k2[0,0,0] = 1. # to avoid dividing by 0
-        delta_k /= k2
-        self.log_info('Computing displacement field.')
-        shifts = np.empty_like(self._positions_rec_data)
-        psis = []
-        for iaxis in range(delta_k.ndim):
-            # no need to compute psi on axis where los is 0
-            if not return_psi and self.los is not None and self.los[iaxis] == 0:
-                shifts[:,iaxis] = 0.
-                continue
-            psi = (delta_k*1j*k[iaxis]).to_real(engine=self.fft_engine)
-            # Reading shifts at reconstructed data real-space positions
-            shifts[:,iaxis] = psi.read_cic(self._positions_rec_data)
-            if return_psi: psis.append(psi)
-
-        #self.log_info('A few displacements values:')
-        #for s in shifts[:3]: self.log_info('{}'.format(s))
-        if self.los is None:
-            # Sesh: changed this so that the los is calculated with respect to the current (shifted) posiitons for consistency
-            los = self._positions_rec_data/utils.distance(self._positions_rec_data)[:,None]
-        else:
-            los = self.los
-        # Comments in Julian's code:
-        # For first loop need to approximately remove RSD component from psi to speed up convergence
-        # See Burden et al. 2015: 1504.02591v2, eq. 12 (flat sky approximation)
-        if self._iter == 0:
-            shifts -= self.beta/(1+self.beta)*np.sum(shifts*los,axis=-1)[:,None]*los
-        # Comments in Julian's code:
-        # Remove RSD from original positions of galaxies to give new positions
-        # these positions are then used in next determination of psi,
-        # assumed to not have RSD.
-        # The iterative procedure then uses the new positions as if they'd been read in from the start
-        _positions_rec_data = self._positions_data - self.f*np.sum(shifts*los,axis=-1)[:,None]*los
-        diff = _positions_rec_data - self.mesh_delta.offset
-        if self.los is None and np.any((diff < 0) | (diff > self.mesh_delta.boxsize - self.mesh_delta.cellsize)):
-            self.log_warning('Some particles are out-of-bounds.')
-        self._positions_rec_data = diff % self.mesh_delta.boxsize + self.mesh_delta.offset
-        #if self.los is not None:
-        #    self._positions_rec_data %= self.mesh_delta.boxsize
-        self._iter += 1
-        if return_psi:
-            return psis
-
-
-class RandomIterativeFFTParticleReconstruction(OriginalIterativeFFTParticleReconstruction):
-
-    """Any update / test / improvement upon original algorithm."""
-
     def assign_randoms(self, positions, weights=None):
         """
         Assign (paint) randoms to :attr:`mesh_randoms`.
@@ -306,6 +243,9 @@ class RandomIterativeFFTParticleReconstruction(OriginalIterativeFFTParticleRecon
             # Sesh: added lines here to keep track of random positions and weights
             self._positions_randoms = positions
             self._weights_randoms = weights
+        else:
+            self._positions_randoms = np.concatenate([self._positions_randoms,positions],axis=0)
+            self._weights_randoms = np.concatenate([self._weights_randoms,weights],axis=0)
         #super(OriginalIterativeFFTParticleReconstruction,self).assign_randoms(positions,weights=weights)
         self.mesh_randoms.assign_cic(positions,weights=weights)
         self._sum_randoms += np.sum(weights)
@@ -323,86 +263,179 @@ class RandomIterativeFFTParticleReconstruction(OriginalIterativeFFTParticleRecon
         """
         self._iter = 0
         # Gaussian smoothing before density contrast calculation
-        self.mesh_data.smooth_gaussian(self.smoothing_radius,method='fft',engine=self.fft_engine)
-        if self.has_randoms: self.mesh_randoms.smooth_gaussian(self.smoothing_radius,method='fft',engine=self.fft_engine)
+        self.mesh_data.smooth_gaussian(self.smoothing_radius,method='fft')
+        if self.has_randoms: self.mesh_randoms.smooth_gaussian(self.smoothing_radius,method='fft')
         self._positions_rec_data = self._positions_data.copy()
         # Sesh: we are also keeping track of shifted random positions
-        self.ref_positions_rec_randoms = self._positions_randoms.copy()
+        self._positions_rec_randoms = self._positions_randoms.copy()
         for iter in range(niterations):
             self.mesh_psi = self._iterate(return_psi=iter==niterations-1)
+        del self.mesh_randoms
 
     def _iterate(self, return_psi=False):
         self.log_info('Running iteration {:d}.'.format(self._iter))
 
         if self._iter > 0:
-            self.mesh_data = self.mesh_delta.copy(value=None)
-            # Sesh: Painting reconstructed data real-space positions: use super in order not to save positions_rec_data/randoms
-            super(OriginalIterativeFFTParticleReconstruction,self).assign_data(self._positions_rec_data,weights=self._weights_data)
+            self.mesh_data = self.mesh_randoms.copy(value=None)
+            # Painting reconstructed data real-space positions
+            super(OriginalIterativeFFTParticleReconstruction,self).assign_data(self._positions_rec_data,weights=self._weights_data) # super in order not to save positions_rec_data
+            # Gaussian smoothing before density contrast calculation
+            self.mesh_data.smooth_gaussian(self.smoothing_radius,method='fft')
+            # Sesh: added equivalent lines to keep track of shifted randoms too
+            self.mesh_randoms = self.mesh_randoms.copy(value=None)
             super(OriginalIterativeFFTParticleReconstruction,self).assign_randoms(self._positions_rec_randoms,weights=self._weights_randoms)
-            # Sesh: Gaussian smoothing both fields before density contrast calculation
-            self.mesh_data.smooth_gaussian(self.smoothing_radius,method='fft',engine=self.fft_engine)
-            self.mesh_randoms.smooth_gaussian(self.smoothing_radius,method='fft',engine=self.fft_engine)
+            self.mesh_randoms.smooth_gaussian(self.smoothing_radius,method='fft')
 
         self.set_density_contrast(ran_min=self.ran_min, smoothing_radius=self.smoothing_radius)
-        del self.mesh_data, self.mesh_randoms
-        delta_k = self.mesh_delta.to_complex(engine=self.fft_engine)
+        del self.mesh_data
+        delta_k = self.mesh_delta.to_complex()
+        del self.mesh_delta
         k = utils.broadcast_arrays(*delta_k.coords())
-        k2 = sum(kk**2 for kk in k)
-        k2[0,0,0] = 1. # to avoid dividing by 0
-        delta_k /= k2
+        delta_k.prod_sum([k**2 for k in delta_k.coords()], exp=-1)
+        delta_k[0,0,0] = 0.
+        #k = utils.broadcast_arrays(*delta_k.coords())
+        #k2 = sum(kk**2 for kk in k)
+        #k2[0,0,0] = 1. # to avoid dividing by 0
+        #delta_k /= k2
         self.log_info('Computing displacement field.')
         shifts = np.empty_like(self._positions_rec_data)
         # Sesh: now we need shifts for randoms as well
         shifts_randoms = np.empty_like(self._positions_rec_randoms)
+        # Sesh: any shifts we apply to the randoms must be randomised to avoid correlations
+        indices = np.random.permutation(len(self._positions_randoms))
         psis = []
         for iaxis in range(delta_k.ndim):
             # no need to compute psi on axis where los is 0
             if not return_psi and self.los is not None and self.los[iaxis] == 0:
                 shifts[:,iaxis] = 0.
                 continue
-            psi = (delta_k*1j*k[iaxis]).to_real(engine=self.fft_engine)
-            # Sesh: Reading shifts at reconstructed data and random real-space positions
+            psi = (delta_k*1j*k[iaxis]).to_real()
+            # Reading shifts at reconstructed data real-space positions
             shifts[:,iaxis] = psi.read_cic(self._positions_rec_data)
-            shifts_randoms[:,iaxis] = psi.read_cic(self._positions_rec_randoms)
+            # Sesh: read shifts in reconstructed random real-space positions too, but we do this
+            # at the positions of randomly chosen randoms to avoid correlations
+            shifts_randoms[:,iaxis] = psi.read_cic(self._positions_rec_randoms[indices])
             if return_psi: psis.append(psi)
 
         #self.log_info('A few displacements values:')
         #for s in shifts[:3]: self.log_info('{}'.format(s))
-        # Sesh: now we need to keep track of the los vector for randoms as well
         if self.los is None:
             los = self._positions_data/utils.distance(self._positions_data)[:,None]
+            #Sesh: added line for randoms
             los_randoms = self._positions_randoms/utils.distance(self._positions_randoms)[:,None]
         else:
             los = self.los
+            # Sesh: added line for randoms
             los_randoms = self.los
+
         # Comments in Julian's code:
         # For first loop need to approximately remove RSD component from psi to speed up convergence
         # See Burden et al. 2015: 1504.02591v2, eq. 12 (flat sky approximation)
         if self._iter == 0:
             shifts -= self.beta/(1+self.beta)*np.sum(shifts*los,axis=-1)[:,None]*los
             # Sesh: we also shift the randoms radially so they still have the same n(z) as galaxies
-            # but we choose a rnadom location to evaluate these shifts so they are not correlated
-            indices = np.random.permutation(np.arange(len(self._positions_randoms)))
-            shifts_randoms -= self.beta/(1+self.beta)*np.sum(shifts_randoms[indices]*los_randoms,axis=-1)[:,None]*los_randoms
+            shifts_randoms -= self.beta/(1+self.beta)*np.sum(shifts_randoms*los_randoms,axis=-1)[:,None]*los_randoms
         # Comments in Julian's code:
         # Remove RSD from original positions of galaxies to give new positions
         # these positions are then used in next determination of psi,
         # assumed to not have RSD.
         # The iterative procedure then uses the new positions as if they'd been read in from the start
         _positions_rec_data = self._positions_data - self.f*np.sum(shifts*los,axis=-1)[:,None]*los
-        diff = _positions_rec_data - self.mesh_delta.offset
-        if self.los is None and np.any((diff < 0) | (diff > self.mesh_delta.boxsize - self.mesh_delta.cellsize)):
+        diff = _positions_rec_data - self.mesh_randoms.offset
+        if self.los is None and np.any((diff < 0) | (diff > self.mesh_randoms.boxsize - self.mesh_randoms.cellsize)):
             self.log_warning('Some particles are out-of-bounds.')
-        self._positions_rec_data = diff % self.mesh_delta.boxsize + self.mesh_delta.offset
+        self._positions_rec_data = diff % self.mesh_randoms.boxsize + self.mesh_randoms.offset
         # Sesh: repeat the above step for randoms
-        indices = np.random.permutation(np.arange(len(self._positions_randoms)))
-        _positions_rec_randoms = self._positions_randoms - self.f*np.sum(shifts_randoms[indices]*los_randoms,axis=-1)[:,None]*los_randoms
-        diff = _positions_rec_randoms - self.mesh_delta.offset
-        if self.los_randoms is None and np.any((diff < 0) | (diff > self.mesh_delta.boxsize - self.mesh_delta.cellsize)):
+        _positions_rec_randoms = self._positions_randoms - self.f*np.sum(shifts_randoms*los_randoms,axis=-1)[:,None]*los_randoms
+        diff = _positions_rec_randoms - self.mesh_randoms.offset
+        if self.los is None and np.any((diff < 0) | (diff > self.mesh_randoms.boxsize - self.mesh_randoms.cellsize)):
             self.log_warning('Some randoms are out-of-bounds.')
-        self._positions_rec_randoms = diff % self.mesh_delta.boxsize + self.mesh_delta.offset
+        self._positions_rec_randoms = diff % self.mesh_randoms.boxsize + self.mesh_randoms.offset
         #if self.los is not None:
-        #    self._positions_rec_data %= self.mesh_delta.boxsize
+        #    self._positions_rec_data %= self.mesh_randoms.boxsize
         self._iter += 1
         if return_psi:
             return psis
+
+    def read_shifts(self, positions, field='disp+rsd'):
+        """
+        Read displacement at input positions.
+
+        Note
+        ----
+        Data shifts are read at the reconstructed real-space positions,
+        while random shifts are read at the redshift-space positions, is that consistent?
+
+        Parameters
+        ----------
+        positions : array of shape (N, 3), string
+            Cartesian positions.
+            Pass string 'data' if you wish to get the displacements for the input data positions, passed to :meth:`assign_data`.
+            Note that in this case, shifts are read at the reconstructed data real-space positions.
+
+        field : string, default='disp+rsd'
+            Either 'disp' (Zeldovich displacement), 'rsd' (RSD displacement), or 'disp+rsd' (Zeldovich + RSD displacement).
+
+        Returns
+        -------
+        shifts : array of shape (N, 3)
+            Displacements.
+        """
+        field = field.lower()
+        allowed_fields = ['disp', 'rsd', 'disp+rsd']
+        if field not in allowed_fields:
+            raise ReconstructionError('Unknown field {}. Choices are {}'.format(field, allowed_fields))
+
+        def read_cic(positions):
+            shifts = np.empty_like(positions)
+            for iaxis,psi in enumerate(self.mesh_psi):
+                shifts[:,iaxis] = psi.read_cic(positions)
+            return shifts
+
+        if isinstance(positions, str) and positions == 'data':
+            shifts = read_cic(self._positions_rec_data)
+            if field == 'disp':
+                return shifts
+            rsd = self._positions_data - self._positions_rec_data
+            if field == 'rsd':
+                return rsd
+            # field == 'disp+rsd'
+            shifts += rsd
+            return shifts
+
+        if isinstance(positions, str) and positions == 'randoms':
+            shifts = read_cic(self._positions_rec_randoms)
+            if field == 'disp':
+                return shifts
+            rsd = self._positions_randoms - self._positions_rec_randoms
+            if field == 'rsd':
+                return rsd
+            # field == 'disp+rsd'
+            shifts += rsd
+            return shifts
+
+        shifts = read_cic(positions)
+
+        if field == 'disp':
+            return shifts
+
+        if self.los is None:
+            los = positions/utils.distance(positions)[:,None]
+        else:
+            los = self.los
+        rsd = self.f*np.sum(shifts*los,axis=-1)[:,None]*los
+
+        if field == 'rsd':
+            return rsd
+
+        # field == 'disp+rsd'
+        # we follow convention of original algorithm: remove RSD first,
+        # then remove Zeldovich displacement
+        real_positions = positions - rsd
+        diff = real_positions - self.mesh_psi[0].offset
+        if self.los is None and np.any((diff < 0) | (diff > self.mesh_psi[0].boxsize - self.mesh_psi[0].cellsize)):
+            self.log_warning('Some particles are out-of-bounds.')
+        real_positions = diff % self.mesh_psi[0].boxsize + self.mesh_psi[0].offset
+        shifts = read_cic(real_positions)
+
+        return shifts + rsd
