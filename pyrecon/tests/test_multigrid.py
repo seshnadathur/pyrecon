@@ -43,22 +43,33 @@ def test_no_nrandoms():
 
 
 def test_dtype():
+    # ran_min threshold in set_density_contrast() may not mask exactly the same number of cells in f4 and f8 cases, hence big difference in the end
+    # With current seeds masks are the same in f4 and f8 cases
     data = get_random_catalog(seed=42)
-    randoms = get_random_catalog(seed=84)
-    recon_f4 = MultiGridReconstruction(f=0.8,bias=2.,nthreads=4,positions=randoms['Position'],nmesh=64,dtype='f4')
-    recon_f4.assign_data(data['Position'],data['Weight'])
-    recon_f4.assign_randoms(randoms['Position'],randoms['Weight'])
-    recon_f4.set_density_contrast()
-    recon_f4.run()
-    shifts_f4 = recon_f4.read_shifts(data['Position'],field='disp+rsd')
-    recon_f8 = MultiGridReconstruction(f=0.8,bias=2.,nthreads=4,positions=randoms['Position'],nmesh=64,dtype='f8')
-    recon_f8.assign_data(data['Position'],data['Weight'])
-    recon_f8.assign_randoms(randoms['Position'],randoms['Weight'])
-    recon_f8.set_density_contrast()
-    recon_f8.run()
-    shifts_f8 = recon_f8.read_shifts(data['Position'],field='disp+rsd')
-    assert not np.all(shifts_f4 == shifts_f8)
-    assert np.allclose(shifts_f4,shifts_f8,rtol=1e-2,atol=1e-2)
+    randoms = get_random_catalog(seed=81)
+    for los in [None, 'x'][1:]:
+        recon_f4 = MultiGridReconstruction(f=0.8,bias=2.,nthreads=4,positions=randoms['Position'],nmesh=64,los=los,dtype='f4')
+        recon_f4.assign_data(data['Position'],data['Weight'])
+        recon_f4.assign_randoms(randoms['Position'],randoms['Weight'])
+        recon_f4.set_density_contrast()
+        assert recon_f4.mesh_delta.dtype.itemsize == 4
+        recon_f4.run()
+        assert recon_f4.mesh_phi.dtype.itemsize == 4
+        shifts_f4 = recon_f4.read_shifts(data['Position'].astype('f8'),field='disp+rsd')
+        assert shifts_f4.dtype.itemsize == 8
+        shifts_f4 = recon_f4.read_shifts(data['Position'].astype('f4'),field='disp+rsd')
+        assert shifts_f4.dtype.itemsize == 4
+        recon_f8 = MultiGridReconstruction(f=0.8,bias=2.,nthreads=4,positions=randoms['Position'],nmesh=64,los=los,dtype='f8')
+        recon_f8.assign_data(data['Position'],data['Weight'])
+        recon_f8.assign_randoms(randoms['Position'],randoms['Weight'])
+        recon_f8.set_density_contrast()
+        assert recon_f8.mesh_delta.dtype.itemsize == 8
+        recon_f8.run()
+        assert recon_f8.mesh_phi.dtype.itemsize == 8
+        shifts_f8 = recon_f8.read_shifts(data['Position'],field='disp+rsd')
+        assert shifts_f8.dtype.itemsize == 8
+        assert not np.all(shifts_f4 == shifts_f8)
+        assert np.allclose(shifts_f4, shifts_f8, atol=1e-2, rtol=1e-2)
 
 
 def test_mem():
@@ -232,7 +243,7 @@ def test_script_no_randoms(data_fn, output_data_fn):
     data = fitsio.read(data_fn)
     boxsize = 800
     boxcenter = boxsize/2.
-    recon = MultiGridReconstruction(nthreads=4,los='x',boxcenter=boxcenter,boxsize=boxsize,nmesh=128,dtype='f8')
+    recon = MultiGridReconstruction(nthreads=4,los=0,boxcenter=boxcenter,boxsize=boxsize,nmesh=128,dtype='f8')
     recon.set_cosmo(f=0.8,bias=2.)
     recon.assign_data(data['RSDPosition'])
     recon.set_density_contrast()
