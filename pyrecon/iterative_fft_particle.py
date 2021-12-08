@@ -265,10 +265,11 @@ class IterativeFFTParticleReconstruction(OriginalIterativeFFTParticleReconstruct
         self._iter = 0
         # Gaussian smoothing before density contrast calculation
         self.mesh_data.smooth_gaussian(self.smoothing_radius,method='fft')
-        if self.has_randoms: self.mesh_randoms.smooth_gaussian(self.smoothing_radius,method='fft')
         self._positions_rec_data = self._positions_data.copy()
-        # Sesh: we are also keeping track of shifted random positions
-        self._positions_rec_randoms = self._positions_randoms.copy()
+        if self.has_randoms:
+            self.mesh_randoms.smooth_gaussian(self.smoothing_radius,method='fft')
+            # Sesh: we are also keeping track of shifted random positions
+            self._positions_rec_randoms = self._positions_randoms.copy()
         for iter in range(niterations):
             self.mesh_psi = self._iterate(return_psi=iter==niterations-1)
         del self.mesh_randoms
@@ -277,15 +278,17 @@ class IterativeFFTParticleReconstruction(OriginalIterativeFFTParticleReconstruct
         self.log_info('Running iteration {:d}.'.format(self._iter))
 
         if self._iter > 0:
-            self.mesh_data = self.mesh_randoms.copy(value=None)
+            self.mesh_data = self.mesh_randoms.copy()
+            self.mesh_data.value = None # to reset mesh values
             # Painting reconstructed data real-space positions
             super(OriginalIterativeFFTParticleReconstruction,self).assign_data(self._positions_rec_data,weights=self._weights_data) # super in order not to save positions_rec_data
             # Gaussian smoothing before density contrast calculation
             self.mesh_data.smooth_gaussian(self.smoothing_radius,method='fft')
             # Sesh: added equivalent lines to keep track of shifted randoms too
-            self.mesh_randoms = self.mesh_randoms.copy(value=None)
-            super(OriginalIterativeFFTParticleReconstruction,self).assign_randoms(self._positions_rec_randoms,weights=self._weights_randoms)
-            self.mesh_randoms.smooth_gaussian(self.smoothing_radius,method='fft')
+            if self.has_randoms:
+                self.mesh_randoms.value = None
+                super(OriginalIterativeFFTParticleReconstruction,self).assign_randoms(self._positions_rec_randoms,weights=self._weights_randoms)
+                self.mesh_randoms.smooth_gaussian(self.smoothing_radius,method='fft')
 
         self.set_density_contrast(ran_min=self.ran_min, smoothing_radius=self.smoothing_radius)
         del self.mesh_data
@@ -301,9 +304,10 @@ class IterativeFFTParticleReconstruction(OriginalIterativeFFTParticleReconstruct
         self.log_info('Computing displacement field.')
         shifts = np.empty_like(self._positions_rec_data)
         # Sesh: now we need shifts for randoms as well
-        shifts_randoms = np.empty_like(self._positions_rec_randoms)
-        # Sesh: any shifts we apply to the randoms must be randomised to avoid correlations
-        indices = np.random.permutation(len(self._positions_randoms))
+        if self.has_randoms:
+            shifts_randoms = np.empty_like(self._positions_rec_randoms)
+            # Sesh: any shifts we apply to the randoms must be randomised to avoid correlations
+            indices = np.random.permutation(len(self._positions_randoms))
         psis = []
         for iaxis in range(delta_k.ndim):
             # no need to compute psi on axis where los is 0
@@ -315,7 +319,8 @@ class IterativeFFTParticleReconstruction(OriginalIterativeFFTParticleReconstruct
             shifts[:,iaxis] = psi.read_cic(self._positions_rec_data)
             # Sesh: read shifts in reconstructed random real-space positions too, but we do this
             # at the positions of randomly chosen randoms to avoid correlations
-            shifts_randoms[:,iaxis] = psi.read_cic(self._positions_rec_randoms[indices])
+            if self.has_randoms:
+                shifts_randoms[:,iaxis] = psi.read_cic(self._positions_rec_randoms[indices])
             if return_psi: psis.append(psi)
 
         #self.log_info('A few displacements values:')
@@ -323,11 +328,13 @@ class IterativeFFTParticleReconstruction(OriginalIterativeFFTParticleReconstruct
         if self.los is None:
             los = self._positions_data/utils.distance(self._positions_data)[:,None]
             #Sesh: added line for randoms
-            los_randoms = self._positions_randoms/utils.distance(self._positions_randoms)[:,None]
+            if self.has_randoms:
+                los_randoms = self._positions_randoms/utils.distance(self._positions_randoms)[:,None]
         else:
             los = self.los
             # Sesh: added line for randoms
-            los_randoms = self.los
+            if self.has_randoms:
+                los_randoms = self.los
 
         # Comments in Julian's code:
         # For first loop need to approximately remove RSD component from psi to speed up convergence
@@ -335,7 +342,8 @@ class IterativeFFTParticleReconstruction(OriginalIterativeFFTParticleReconstruct
         if self._iter == 0:
             shifts -= self.beta/(1+self.beta)*np.sum(shifts*los,axis=-1)[:,None]*los
             # Sesh: we also shift the randoms radially so they still have the same n(z) as galaxies
-            shifts_randoms -= self.beta/(1+self.beta)*np.sum(shifts_randoms*los_randoms,axis=-1)[:,None]*los_randoms
+            if self.has_randoms:
+                shifts_randoms -= self.beta/(1+self.beta)*np.sum(shifts_randoms*los_randoms,axis=-1)[:,None]*los_randoms
         # Comments in Julian's code:
         # Remove RSD from original positions of galaxies to give new positions
         # these positions are then used in next determination of psi,
@@ -347,11 +355,12 @@ class IterativeFFTParticleReconstruction(OriginalIterativeFFTParticleReconstruct
             self.log_warning('Some particles are out-of-bounds.')
         self._positions_rec_data = diff % self.mesh_randoms.boxsize + self.mesh_randoms.offset
         # Sesh: repeat the above step for randoms
-        _positions_rec_randoms = self._positions_randoms - self.f*np.sum(shifts_randoms*los_randoms,axis=-1)[:,None]*los_randoms
-        diff = _positions_rec_randoms - self.mesh_randoms.offset
-        if self.los is None and np.any((diff < 0) | (diff > self.mesh_randoms.boxsize - self.mesh_randoms.cellsize)):
-            self.log_warning('Some randoms are out-of-bounds.')
-        self._positions_rec_randoms = diff % self.mesh_randoms.boxsize + self.mesh_randoms.offset
+        if self.has_randoms:
+            _positions_rec_randoms = self._positions_randoms - self.f*np.sum(shifts_randoms*los_randoms,axis=-1)[:,None]*los_randoms
+            diff = _positions_rec_randoms - self.mesh_randoms.offset
+            if self.los is None and np.any((diff < 0) | (diff > self.mesh_randoms.boxsize - self.mesh_randoms.cellsize)):
+                self.log_warning('Some randoms are out-of-bounds.')
+            self._positions_rec_randoms = diff % self.mesh_randoms.boxsize + self.mesh_randoms.offset
         #if self.los is not None:
         #    self._positions_rec_data %= self.mesh_randoms.boxsize
         self._iter += 1
@@ -405,6 +414,8 @@ class IterativeFFTParticleReconstruction(OriginalIterativeFFTParticleReconstruct
             return shifts
 
         if isinstance(positions, str) and positions == 'randoms':
+            if not self.has_randoms:
+                raise ReconstructionError("Cannot pass 'randoms' to read_shifts if no randoms provided")
             shifts = read_cic(self._positions_rec_randoms)
             if field == 'disp':
                 return shifts
