@@ -276,8 +276,7 @@ class NewIterativeFFTParticleReconstruction(OriginalIterativeFFTParticleReconstr
             self._positions_rec_randoms = self._positions_randoms.copy()
         for iter in range(niterations):
             self.mesh_psi = self._iterate(return_psi=iter==niterations-1)
-        del self.mesh_randoms
-
+        
     def _iterate(self, return_psi=False):
         self.log_info('Running iteration {:d}.'.format(self._iter))
 
