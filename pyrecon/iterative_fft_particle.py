@@ -230,6 +230,10 @@ class IterativeFFTParticleReconstruction(OriginalIterativeFFTParticleReconstruct
 
     """Any update / test / improvement upon original algorithm."""
 
+class NewIterativeFFTParticleReconstruction(OriginalIterativeFFTParticleReconstruction):
+
+    """Any update / test / improvement upon original algorithm."""
+
     def assign_randoms(self, positions, weights=None):
         """
         Assign (paint) randoms to :attr:`mesh_randoms`.
